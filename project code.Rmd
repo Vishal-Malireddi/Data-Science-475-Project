@@ -1,0 +1,454 @@
+---
+title: "CPT_S 475 Project Code"
+author: "Christian Estlund, Vishal Malireddi"
+date: "2024-11-25"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(zoo)
+library(tidyverse)
+library(readxl)
+library(RecordLinkage)
+library(stringdist)
+library(ggplot2)
+```
+
+```{r reading data, warning = FALSE, message = FALSE}
+wrecks <- read.csv("wrecks_1.csv")
+artifacts <- read_excel("artefacts_0.xlsx")
+artifacts <- artifacts %>% drop_na(wreck)
+numismatics <- read_excel("numismatics_0.xlsx")
+```
+
+```{r checking for matches between wreck name and artifact location}
+titles <- (wrecks %>% filter(!is.na(Title), Title != "Unknown"))$Title # name of the wreck (1 per row)
+titles <- gsub('[\r\n]', ' ', titles) # removing \r\n from titles
+artifact_wreck <- artifacts$wreck # name of the wreck associated with the artifact
+matches = 0
+non_matches = c() # list of wrecks in the artifacts that don't have a match in the wrecks dataset
+
+# looking for matches between the wrecks dataset and the wrecks in the artifact dataset
+
+for (wreck in artifact_wreck) {
+  # exact match
+  if (wreck %in% titles) {
+    matches = matches + 1
+  } else {
+    if(!(wreck %in% non_matches)) { # new non-match
+      non_matches <- append(non_matches, wreck)
+    }
+  }
+}
+
+```
+
+```{r wreck similarity using Jaro Winkler}
+
+# positive example
+min(stringdist(tolower("Bunbury Unknown"), tolower(titles), method = "jw", p = 0.125))
+which.min(stringdist(tolower("Bunbury Unknown"), tolower(titles), method = "jw", p = 0.125))
+titles[which.min(stringdist(tolower("Bunbury Unknown"), tolower(titles), method = "jw", p = .125))]
+
+# negative example; p = 0 gives the least similarity, since there is no correction
+min(stringdist(tolower("Blackhawk Bay"), tolower(titles), method = "jw", p = .125))
+which.min(stringdist(tolower("Blackhawk Bay"), tolower(titles), method = "jw", p = .125))
+titles[which.min(stringdist(tolower("Blackhawk Bay"), tolower(titles), method = "jw", p = .125))]
+
+```
+
+```{r wreck matching using string parsing}
+title_first_words = c()
+for (i in 1:length(titles)) {
+  title_first_words[i] <- str_split_1(titles[i], " ")[1]
+}
+
+artifact_first_words = c()
+for (i in 1:length(artifact_wreck)) {
+  artifact_first_words[i] <- str_split_1(artifact_wreck[i], " ")[1]
+}
+
+parse_match_index <- c()
+parse_non_matches <- c()
+
+for (wreck in 1:length(artifact_first_words)) {
+  # exact match
+  if (!is.na(match(artifact_first_words[wreck], title_first_words))) {
+    parse_match_index[wreck] = match(artifact_first_words[wreck], title_first_words)
+  } else {
+    if(!(artifact_first_words[wreck] %in% parse_non_matches)) { # new non-match
+      parse_non_matches <- append(parse_non_matches, artifact_first_words[wreck])
+    }
+  }
+}
+
+unique_parse_match_index <- unique(parse_match_index)
+
+print("Artifact wrecks with no match:")
+parse_non_matches
+
+```
+
+```{r looking for duplicate titles for wrecks}
+title_count <- data.frame(table(titles)) # get counts of all titles
+title_count <- title_count %>% filter (Freq > 1) # filter to only duplicate titles
+
+duplicate_matches <- c() # list of artifact/wreck matches that are also duplicates
+
+for (index in unique_parse_match_index) {
+  if (titles[index] %in% title_count$titles) {
+    duplicate_matches <- append(duplicate_matches, titles[index])
+  }
+}
+print("Number of matches that have duplicate entries in wrecks:")
+length(duplicate_matches)
+
+print("Duplicate titles:")
+sort(duplicate_matches)
+
+```
+
+```{r appending wreck match to artifacts}
+artifacts$match <- parse_match_index
+
+artifacts <- artifacts %>% mutate(
+  match_title = titles[match]
+)
+
+write.csv(artifacts, "artifacts_updated.csv")
+```
+
+``` {r discovering common artifacts}
+artifacts <- read.csv("artifacts_updated.csv")
+
+split_artifacts <- strsplit(as.character(artifacts$Description), split = "[.,:;]")
+
+all_artefacts <- unlist(split_artifacts)
+all_artefacts <- trimws(all_artefacts)
+all_artefacts <- all_artefacts[all_artefacts != ""]
+
+artifact_freq <- table(all_artefacts)
+artifact_freq <- as.data.frame(artifact_freq)
+colnames(artifact_freq) <- c("Artifact", "Frequency")
+artifact_freq <- artifact_freq[order(-artifact_freq$Frequency), ]
+
+
+matching_rows <- artifact_freq[grep("iron", artifact_freq$Artifact, ignore.case = TRUE), ]
+print(matching_rows)
+Iron_list <-list("iron", "Iron fragments", "Iron fragment", "Iron concretion", "Iron")
+
+matching_rows <- artifact_freq[grep("Cannon", artifact_freq$Artifact, ignore.case = TRUE), ]
+print(matching_rows)
+Cannon_list <-list("Cannon ball", "Cannon balls", "Cannon ball fragment", "Cannon ball fragments")
+
+matching_rows <- artifact_freq[grep("copper", artifact_freq$Artifact, ignore.case = TRUE), ]
+print(matching_rows)
+Copper_list <-list("copper", "Copper", "Copper fragments", "copper alloy")
+
+matching_rows <- artifact_freq[grep("brass", artifact_freq$Artifact, ignore.case = TRUE), ]
+print(matching_rows)
+Copper_list <-list("brass", "Brass", "copper/brass")
+
+matching_rows <- artifact_freq[grep("Bone", artifact_freq$Artifact, ignore.case = TRUE), ]
+print(matching_rows)
+Copper_list <-list("Bone", "Bones", "bone")
+```
+
+``` {r DF for iron dates and frequency}
+iron_freq <- data.frame(year = integer(0), frequency = integer(0))
+
+result_df <- data.frame(value = numeric(0))
+
+# Loop through each row in df
+for (i in 1:nrow(artifacts)) {
+  # Check if the description contains 'iron'
+  if (grepl("iron", artifacts$Description[i], ignore.case = TRUE)) {
+    # Access the corresponding row in df using the match column from df
+    row_number <- artifacts$match[i]
+    value <- wrecks[row_number, 2]
+    
+    # Get the value from df at the specified row
+    result_df <- rbind(result_df, data.frame(value = value))
+  }
+}
+
+
+result_df <- data.frame(value = result_df)
+
+result_df <- result_df %>%
+  filter(nchar(value) >= 4)
+
+
+for (i in 1:nrow(result_df)) {
+  # Extract the first 4 digits from the description column
+  extracted_value <- substr(result_df$value[i], 1, 4)
+  
+  # Check if the extracted value exists in df
+  if (extracted_value %in% iron_freq$year) {
+    # If value exists, increment the frequency
+    iron_freq[iron_freq$year == extracted_value, "frequency"] <- iron_freq[iron_freq$year == extracted_value, "frequency"] + 1
+  } else {
+    # If value doesn't exist, add it with frequency 1
+    iron_freq <- rbind(iron_freq, data.frame(year = extracted_value, frequency = 1))
+  }
+}
+
+iron_freq <- subset(iron_freq, year >= 1600 & year <= 2024)
+iron_freq <- iron_freq[iron_freq$year != "11/0", ]
+iron_freq <- iron_freq[order(iron_freq$year), ]
+
+```
+
+``` {r DF for cannon dates and frequency}
+cannon_freq <- data.frame(year = integer(0), frequency = integer(0))
+
+result_df <- data.frame(value = numeric(0))
+
+# Loop through each row in df
+for (i in 1:nrow(artifacts)) {
+  # Check if the description contains 'cannon'
+  if (grepl("cannon", artifacts$Description[i], ignore.case = TRUE)) {
+    # Access the corresponding row in df using the 'match' column from df
+    row_number <- artifacts$match[i]
+    value <- wrecks[row_number, 2]
+    
+    # Get the value from df at the specified row
+    result_df <- rbind(result_df, data.frame(value = value))
+  }
+}
+
+
+result_df <- data.frame(value = result_df)
+
+result_df <- result_df %>%
+  filter(nchar(value) >= 4)
+
+
+for (i in 1:nrow(result_df)) {
+  # Extract the first 4 digits from the column
+  extracted_value <- substr(result_df$value[i], 1, 4)
+  
+  # Check if the extracted value exists in df
+  if (extracted_value %in% cannon_freq$year) {
+    # If value exists, increment the frequency
+    cannon_freq[cannon_freq$year == extracted_value, "frequency"] <- cannon_freq[cannon_freq$year == extracted_value, "frequency"] + 1
+  } else {
+    # If value doesn't exist, add it with frequency 1
+    cannon_freq <- rbind(cannon_freq, data.frame(year = extracted_value, frequency = 1))
+  }
+}
+
+cannon_freq <- subset(cannon_freq, year >= 1600 & year <= 2024)
+cannon_freq <- cannon_freq[order(cannon_freq$year), ]
+
+```
+
+``` {r DF for copper dates and frequency}
+copper_freq <- data.frame(year = integer(0), frequency = integer(0))
+
+result_df <- data.frame(value = numeric(0))
+
+# Loop through each row in df
+for (i in 1:nrow(artifacts)) {
+  # Check if the description contains 'copper'
+  if (grepl("copper", artifacts$Description[i], ignore.case = TRUE)) {
+    # Access the corresponding row in df using the 'match' column from df
+    row_number <- artifacts$match[i]
+    value <- wrecks[row_number, 2]
+    
+    # Get the value from df at the specified row
+    result_df <- rbind(result_df, data.frame(value = value))
+  }
+}
+
+
+result_df <- data.frame(value = result_df)
+
+result_df <- result_df %>%
+  filter(nchar(value) >= 4)
+
+
+for (i in 1:nrow(result_df)) {
+  # Extract the first 4 digits from the column
+  extracted_value <- substr(result_df$value[i], 1, 4)
+  
+  # Check if the extracted value exists in df
+  if (extracted_value %in% copper_freq$year) {
+    # If value exists, increment the frequency
+    copper_freq[copper_freq$year == extracted_value, "frequency"] <- copper_freq[copper_freq$year == extracted_value, "frequency"] + 1
+  } else {
+    # If value doesn't exist, add it with frequency 1
+    copper_freq <- rbind(copper_freq, data.frame(year = extracted_value, frequency = 1))
+  }
+}
+
+copper_freq <- subset(copper_freq, year >= 1600 & year <= 2024)
+copper_freq <- copper_freq[order(copper_freq$year), ]
+
+```
+
+``` {r DF for brass dates and frequency}
+brass_freq <- data.frame(year = integer(0), frequency = integer(0))
+
+result_df <- data.frame(value = numeric(0))
+
+# Loop through each row in df
+for (i in 1:nrow(artifacts)) {
+  # Check if the description contains 'brass'
+  if (grepl("brass", artifacts$Description[i], ignore.case = TRUE)) {
+    # Access the corresponding row in df using the 'match' column from df
+    row_number <- artifacts$match[i]
+    value <- wrecks[row_number, 2]
+    
+    # Get the value from df at the specified row
+    result_df <- rbind(result_df, data.frame(value = value))
+  }
+}
+
+
+result_df <- data.frame(value = result_df)
+
+result_df <- result_df %>%
+  filter(nchar(value) >= 4)
+
+
+for (i in 1:nrow(result_df)) {
+  # Extract the first 4 digits from the column
+  extracted_value <- substr(result_df$value[i], 1, 4)
+  
+  # Check if the extracted value exists in df
+  if (extracted_value %in% brass_freq$year) {
+    # If value exists, increment the frequency
+    brass_freq[brass_freq$year == extracted_value, "frequency"] <- brass_freq[brass_freq$year == extracted_value, "frequency"] + 1
+  } else {
+    # If value doesn't exist, add it with frequency 1
+    brass_freq <- rbind(brass_freq, data.frame(year = extracted_value, frequency = 1))
+  }
+}
+
+brass_freq <- subset(brass_freq, year >= 1600 & year <= 2024)
+brass_freq <- brass_freq[order(brass_freq$year), ]
+
+```
+
+``` {r DF for bones dates and frequency}
+bones_freq <- data.frame(year = integer(0), frequency = integer(0))
+
+result_df <- data.frame(value = numeric(0))
+
+# Loop through each row in df
+for (i in 1:nrow(artifacts)) {
+  # Check if the description contains 'bone'
+  if (grepl("bone", artifacts$Description[i], ignore.case = TRUE)) {
+    # Access the corresponding row in df using the 'match' column from df
+    row_number <- artifacts$match[i]
+    value <- wrecks[row_number, 2]
+    
+    # Get the value from df at the specified row
+    result_df <- rbind(result_df, data.frame(value = value))
+  }
+}
+
+
+result_df <- data.frame(value = result_df)
+
+result_df <- result_df %>%
+  filter(nchar(value) >= 4)
+
+
+for (i in 1:nrow(result_df)) {
+  # Extract the first 4 digits from the column
+  extracted_value <- substr(result_df$value[i], 1, 4)
+  
+  # Check if the extracted value exists in df
+  if (extracted_value %in% bones_freq$year) {
+    # If value exists, increment the frequency
+    bones_freq[bones_freq$year == extracted_value, "frequency"] <- bones_freq[bones_freq$year == extracted_value, "frequency"] + 1
+  } else {
+    # If value doesn't exist, add it with frequency 1
+    bones_freq <- rbind(bones_freq, data.frame(year = extracted_value, frequency = 1))
+  }
+}
+
+bones_freq <- subset(bones_freq, year >= 1600 & year <= 2024)
+bones_freq <- bones_freq[order(bones_freq$year), ]
+
+```
+
+``` {r plot1}
+
+iron_year <- iron_freq$year
+cannon_year <- cannon_freq$year
+copper_year <- copper_freq$year
+brass_year <- brass_freq$year
+bones_year <- bones_freq$year
+
+
+# Create zoo time series objects
+zoo_ts1 <- zoo(iron_freq$frequency, order.by = iron_year)
+zoo_ts2 <- zoo(cannon_freq$frequency, order.by = cannon_year)
+zoo_ts3 <- zoo(copper_freq$frequency, order.by = copper_year)
+zoo_ts4 <- zoo(brass_freq$frequency, order.by = brass_year)
+zoo_ts5 <- zoo(bones_freq$frequency, order.by = bones_year)
+
+
+# Plot the first time series
+plot(zoo_ts1, type = "o", col = "blue",ylim = c(0,1500),xlim = c(1630,1950), xlab = "Year", ylab = "Frequency", main = "Frequency of Common Artifacts Over Time (1630-1950)", lwd = 2)
+
+# Overlay the other time series using lines()
+lines(zoo_ts2, type = "o", col = "red", lwd = 2)
+lines(zoo_ts3, type = "o", col = "darkgreen", lwd = 2)
+lines(zoo_ts4, type = "o", col = "purple", lwd = 2)
+lines(zoo_ts5, type = "o", col = "orange", lwd = 2)
+
+# Add a legend
+legend("topright", legend = c("Iron", "Cannon", "Copper", "Brass", "Bones"), col = c("blue", "red", "darkgreen", "purple", "orange"), lty = 1, pch = 1, lwd = 2)
+```
+
+``` {r plot 2}
+
+# Plot the first time series
+plot(zoo_ts1, type = "o", col = "blue",ylim = c(0,200),xlim = c(1822,1950), xlab = "Year", ylab = "Frequency", main = "Frequency of Common Artifacts Over Time (1820-1950)", lwd = 2)
+
+# Overlay the other time series using lines()
+lines(zoo_ts2, type = "o", col = "red", lwd = 2)
+lines(zoo_ts3, type = "o", col = "darkgreen", lwd = 2)
+lines(zoo_ts4, type = "o", col = "purple", lwd = 2)
+lines(zoo_ts5, type = "o", col = "orange", lwd = 2)
+
+# Add a legend
+legend("topright", legend = c("Iron", "Cannon", "Copper", "Brass", "Bones"), col = c("blue", "red", "darkgreen", "purple", "orange"), lty = 1, pch = 1, lwd = 2)
+```
+
+``` {r plot 3}
+ship_dates <- wrecks[, c("When.Lost")]
+wreck_ts <- data.frame(year = character(), frequency = numeric())
+
+ship_dates <- data.frame(value = ship_dates)
+
+ship_dates <- ship_dates %>%
+  filter(nchar(value) >= 4)
+
+for (i in 1:nrow(ship_dates)) {
+  # Extract the first 4 digits from the column
+  extracted_value <- substr(ship_dates$value[i], 1, 4)
+  
+  # Check if the extracted value exists in df
+  if (extracted_value %in% wreck_ts$year) {
+    # If value exists, increment the frequency
+    wreck_ts[wreck_ts$year == extracted_value, "frequency"] <- wreck_ts[wreck_ts$year == extracted_value, "frequency"] + 1
+  } else {
+    # If value doesn't exist, add it with frequency 1
+    wreck_ts <- rbind(wreck_ts, data.frame(year = extracted_value, frequency = 1))
+  }
+}
+
+wreck_ts <- wreck_ts[order(wreck_ts$year), ]
+wreck_ts <- wreck_ts[wreck_ts$year >= 1800 & wreck_ts$year <= 2024, ]
+
+zoo_wreck_ts <- zoo(wreck_ts$frequency, order.by = wreck_ts$year)
+
+plot(zoo_wreck_ts, type = "o", col = "darkgreen", xlab = "Year", ylab = "Frequency", main = "Frequency of Wrecks Over Time", lwd = 1.5)
+
+```
